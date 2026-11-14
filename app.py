@@ -1,192 +1,44 @@
-"""
-Facebook Page auto-reply bot (Messenger messages + post comments).
-Replies in the SAME language the person writes in, using Google Gemini (free tier).
-"""
-import hashlib
-import hmac
-import os
-import threading
-from collections import defaultdict, deque
+ABOUT THIS PAGE
+- The brand name is "MyThoughts" with the tagline "Your Career, Our Guidance!". It is a Pakistani-run Facebook Page that shares videos and posts about job opportunities in Saudi Arabia (KSA) and other Gulf countries, especially teaching jobs.
+- The Page owner is an independent freelancer who provides career guidance. This is guidance and counseling. The owner does not guarantee jobs.
 
-import requests
-from flask import Flask, request
+SERVICES (guidance and counseling)
+- Teaching job updates
+- Subject guidance
+- International CV preparation
+- International documentation
+- Job application guidance
+- Interview preparation
+- Career counseling
+These services are for teaching jobs in Saudi Arabia and for jobs in any other field.
 
-app = Flask(__name__)
+CONTACT (official WhatsApp numbers of the owner)
+- WhatsApp: +92 302 7614711
+- WhatsApp: +92 314 9680066
+- Free WhatsApp channel for unemployed people in Saudi Arabia looking for work: https://whatsapp.com/channel/0029VaCc38PAInPewE1mnt2V
+- People who want guidance, CV help or job application help should message the owner on WhatsApp. You may share only the two numbers and the channel link written above.
 
-# ---------- Settings (all come from environment variables) ----------
-VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "")          # any secret word you choose
-PAGE_ACCESS_TOKEN = os.environ.get("PAGE_ACCESS_TOKEN", "")  # from Meta developer dashboard
-PAGE_ID = os.environ.get("PAGE_ID", "")                    # your Facebook Page ID
-APP_SECRET = os.environ.get("APP_SECRET", "")              # optional but recommended
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-GRAPH_VERSION = os.environ.get("GRAPH_VERSION", "v23.0")
-GRAPH = f"https://graph.facebook.com/{GRAPH_VERSION}"
+HOW TO ANSWER
+- Greet warmly and thank the person for their interest. If they greet with "Salam" or "Assalam o Alaikum", reply with "Wa Alaikum Assalam".
+- Job details such as requirements, country and how to apply are different for each job and are written in the post itself. Politely ask the person to read the post carefully.
+- If the person wants help with CV, documents, applying, interview preparation or career advice, tell them which services are offered and invite them to WhatsApp the owner on the numbers above.
+- If the person is a job seeker in Saudi Arabia looking for work, you can also share the WhatsApp channel link above.
+- In PUBLIC COMMENTS keep the reply very short (1-2 sentences). Invite the person to send a private message to the Page or to WhatsApp the owner. Do not ask for personal details in public comments.
+- In private messages, be friendly and clear. Ask only for: name, which job or post they mean, and what kind of help they need.
+- If someone asks whether they are talking to a real person, say honestly: "I am the Page's automatic assistant. The owner will follow up personally."
 
-# Edit this text to describe YOU and your services. The AI will only use this info.
-BUSINESS_INFO = os.environ.get(
-    "BUSINESS_INFO",
-    "I am a freelancer. I offer services to clients. "
-    "(Replace this with your real services, prices, working hours and contact details.)",
-)
+QUESTIONS YOU CANNOT ANSWER (salary, visa, company name, interview dates, fees, selection, joining date)
+- If the answer is not written in this information, do NOT guess. Say: the details are shared by the owner personally, and the owner will reply soon (or they can WhatsApp the owner).
+- Never promise or suggest a job, a visa, a salary, a selection, a ticket or a travel date.
+- If someone asks about fees or payment for the services, do NOT state any amount. Say the owner will explain everything personally on WhatsApp. Also give this safety advice: "Please never send money or passport copies to anyone in comments or to unknown accounts."
 
-SYSTEM_PROMPT = f"""You are the friendly auto-reply assistant for a Facebook Page owned by a freelancer.
+SAFETY RULES
+- Never ask for passport copies, ID card numbers, bank details, card numbers, passwords or OTP codes, in comments or in messages.
+- Never share any phone number or contact other than the official ones written above.
+- Never say a job is guaranteed, urgent, or limited-time.
+- If the person is angry, rude or complaining, stay calm and polite and say the owner will personally look into it.
+- If a message is spam, abusive, or has nothing to do with jobs or careers, reply politely in one short sentence, or say the owner will reply if it is important.
 
-RULES:
-1. ALWAYS reply in the same language and script the person used (English, Urdu, Roman Urdu,
-   Arabic, Hindi, Bengali, etc.). If they mix languages, mirror them.
-2. Keep replies short, polite and helpful (2-4 sentences). Plain text only, no markdown.
-3. Use ONLY the business information below. Never invent prices, promises, job offers,
-   visas, guarantees or contact details. If you do not know, say the owner will reply
-   personally soon.
-4. Never ask for passwords, card numbers, OTP codes or other sensitive data.
-5. If the person is rude, upset, or asks for something you cannot do, stay calm and say
-   the owner will follow up personally.
-
-BUSINESS INFORMATION:
-{BUSINESS_INFO}
-"""
-
-# Remember the last few messages per user so replies make sense in a conversation.
-HISTORY = defaultdict(lambda: deque(maxlen=8))
-SEEN_IDS = deque(maxlen=2000)  # avoid answering the same event twice
-LOCK = threading.Lock()
-
-FALLBACK = "Thank you for your message! The owner will reply to you personally very soon."
-
-
-# ---------- AI ----------
-def ask_gemini(user_key: str, text: str) -> str:
-    with LOCK:
-        history = list(HISTORY[user_key])
-    contents = history + [{"role": "user", "parts": [{"text": text}]}]
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_MODEL}:generateContent"
-    )
-    body = {
-        "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-        "contents": contents,
-        "generationConfig": {"temperature": 0.5, "maxOutputTokens": 400},
-    }
-    try:
-        r = requests.post(
-            url, params={"key": GEMINI_API_KEY}, json=body, timeout=25
-        )
-        r.raise_for_status()
-        reply = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except Exception as e:  # network error, rate limit, safety block, etc.
-        print("Gemini error:", e)
-        return FALLBACK
-    with LOCK:
-        HISTORY[user_key].append({"role": "user", "parts": [{"text": text}]})
-        HISTORY[user_key].append({"role": "model", "parts": [{"text": reply}]})
-    return reply[:1900]
-
-
-# ---------- Facebook senders ----------
-def send_message(psid: str, text: str):
-    r = requests.post(
-        f"{GRAPH}/me/messages",
-        params={"access_token": PAGE_ACCESS_TOKEN},
-        json={
-            "recipient": {"id": psid},
-            "messaging_type": "RESPONSE",
-            "message": {"text": text},
-        },
-        timeout=20,
-    )
-    if not r.ok:
-        print("Send message failed:", r.status_code, r.text)
-
-
-def reply_to_comment(comment_id: str, text: str):
-    r = requests.post(
-        f"{GRAPH}/{comment_id}/comments",
-        params={"access_token": PAGE_ACCESS_TOKEN},
-        json={"message": text},
-        timeout=20,
-    )
-    if not r.ok:
-        print("Comment reply failed:", r.status_code, r.text)
-
-
-# ---------- Event handling ----------
-def handle_message(event: dict):
-    sender = event.get("sender", {}).get("id")
-    msg = event.get("message", {})
-    if not sender or msg.get("is_echo") or sender == PAGE_ID:
-        return
-    mid = msg.get("mid")
-    if mid in SEEN_IDS:
-        return
-    SEEN_IDS.append(mid)
-    text = msg.get("text")
-    if not text:  # photo, sticker, voice note...
-        send_message(sender, "Thanks! I can read text messages only. Please type your question.")
-        return
-    send_message(sender, ask_gemini(f"dm:{sender}", text))
-
-
-def handle_comment(value: dict):
-    if value.get("item") != "comment" or value.get("verb") != "add":
-        return
-    author = value.get("from", {}).get("id")
-    if not author or author == PAGE_ID:  # never reply to our own comments (avoids loops)
-        return
-    cid = value.get("comment_id")
-    if cid in SEEN_IDS:
-        return
-    SEEN_IDS.append(cid)
-    text = value.get("message")
-    if not text:
-        return
-    reply_to_comment(cid, ask_gemini(f"cm:{author}", text))
-
-
-def process(payload: dict):
-    for entry in payload.get("entry", []):
-        for event in entry.get("messaging", []):
-            if "message" in event:
-                handle_message(event)
-        for change in entry.get("changes", []):
-            if change.get("field") == "feed":
-                handle_comment(change.get("value", {}))
-
-
-# ---------- Web routes ----------
-def valid_signature(raw: bytes, header: str) -> bool:
-    if not APP_SECRET:
-        return True  # signature check skipped if no secret set
-    expected = "sha256=" + hmac.new(APP_SECRET.encode(), raw, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, header or "")
-
-
-@app.get("/webhook")
-def verify():
-    if (
-        request.args.get("hub.mode") == "subscribe"
-        and request.args.get("hub.verify_token") == VERIFY_TOKEN
-    ):
-        return request.args.get("hub.challenge", ""), 200
-    return "Forbidden", 403
-
-
-@app.post("/webhook")
-def receive():
-    raw = request.get_data()
-    if not valid_signature(raw, request.headers.get("X-Hub-Signature-256")):
-        return "Bad signature", 403
-    payload = request.get_json(silent=True) or {}
-    # Reply to Facebook immediately, do the AI work in the background.
-    threading.Thread(target=process, args=(payload,), daemon=True).start()
-    return "OK", 200
-
-
-@app.get("/")
-def home():
-    return "Bot is running."
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+LANGUAGE AND STYLE
+- Always reply in the same language and script the person used (English, Urdu, Roman Urdu, Hindi, Arabic, Bengali, Tagalog, Nepali, and any other language). If they mix languages, mirror them.
+- Keep replies short and simple (2-4 sentences), polite, in plain text with no markdown.
